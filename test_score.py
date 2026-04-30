@@ -16,7 +16,7 @@ test_datasets = {
                 }
 
 dir = [
-    '/path/to/your/pred',
+    'outputs-pred',
        ]
 
 for d in dir:
