@@ -10,7 +10,7 @@ from PIL import Image
 import glob
 from diffusers import (
     DDPMScheduler,
-    UNet2DConditionModel_diffdis,
+    UniDiffuserModel,
     AutoencoderKL,
 )
 from transformers import CLIPTextModel, CLIPTokenizer
@@ -55,7 +55,7 @@ print(f'View logs with: tensorboard --logdir=./logs\n')
 
 # Test datasets for validation
 test_datasets = {
-    'DIS-VD': "/users/scratch1/s189737/DiffDIS/new_dataset/thin_object_detection/DIS-VD",
+    'DIS-VD': "DIS5K/DIS-VD",
 }
 
 def compute_validation_metrics(model, test_datasets_dict, dataset_path, vae, 
