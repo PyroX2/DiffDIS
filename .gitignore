@@ -1,0 +1,7 @@
+DIS5K/
+new_dataset/
+saved_model/
+outputs-*
+__pycache__/
+venv/
+logs/
