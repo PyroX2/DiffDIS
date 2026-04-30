@@ -4,8 +4,8 @@ from PIL import Image
 from torchvision import transforms
 import cv2
 
-test = '/path/to/DIS5K/DIS-TR/gt/'
-save_path ='/path/to/DIS5K/DIS-TR/contour/'
+test = 'DIS-TR/gt/'
+save_path ='DIS-TR/contour/'
 os.makedirs(save_path)
 
 to_test = {'contour':test}
