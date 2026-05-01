@@ -31,7 +31,7 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
 # Create timestamped log directory
-log_base_dir = './logs'
+log_base_dir = './logs/DiT'
 os.makedirs(log_base_dir, exist_ok=True)
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 log_dir = os.path.join(log_base_dir, timestamp)
@@ -40,7 +40,7 @@ writer = SummaryWriter(log_dir)
 parser = argparse.ArgumentParser()
 parser.add_argument('--epoch', type=int, default=90, help='epoch number')
 parser.add_argument('--lr_gen', type=float, default=3e-5, help='learning rate')
-parser.add_argument('--batchsize', type=int, default=4, help='training batch size')
+parser.add_argument('--batchsize', type=int, default=1, help='training batch size')
 parser.add_argument('--trainsize', type=int, default=1024, help='training dataset size')
 parser.add_argument('--decay_rate', type=float, default=0.95, help='decay rate of learning rate')
 parser.add_argument('--decay_epoch', type=int, default=30, help='every n epochs decay learning rate')
@@ -162,10 +162,10 @@ def compute_validation_metrics(model, test_datasets_dict, dataset_path, vae,
                 # Batch discriminative embedding
                 discriminative_label = torch.tensor([[0, 1], [1, 0]], dtype=weight_dtype, device=device)
                 BDE = torch.cat([torch.sin(discriminative_label), torch.cos(discriminative_label)], dim=-1)
-                unet_input = torch.cat([rgb_latents.repeat(2, 1, 1, 1), noisy_unified_latents], dim=1)
+                dit_input = torch.cat([rgb_latents.repeat(2, 1, 1, 1), noisy_unified_latents], dim=1)
                 
                 # Predict noise
-                noise_pred = model(unet_input, timesteps.repeat(2), 
+                noise_pred = model(dit_input, timesteps.repeat(2), 
                                   encoder_hidden_states=batch_empty_text_embed, 
                                   class_labels=BDE,
                                   rgb_token=[rgb_latents.repeat(2, 1, 1, 1), rgb_resized2_latents, 
@@ -271,42 +271,29 @@ def compute_validation_metrics(model, test_datasets_dict, dataset_path, vae,
 # build models
 text_encoder = CLIPTextModel.from_pretrained(opt.pretrained_model_name_or_path, subfolder='text_encoder')
 vae = AutoencoderKL.from_pretrained(opt.pretrained_model_name_or_path, subfolder='vae')
-unet = UNet2DConditionModel_diffdis.from_pretrained(opt.pretrained_model_name_or_path, subfolder="unet",
-                                    in_channels=4, sample_size=96,
-                                    low_cpu_mem_usage=False,
-                                    ignore_mismatched_sizes=False,
-                                    class_embed_type='projection',
-                                    projection_class_embeddings_input_dim=4,
-                                    mid_extra_cross=True,
-                                    mode = 'DBIA',
-                                    use_swci = True, 
-                                    )
+dit = UniDiffuserModel.from_pretrained(opt.pretrained_model_name_or_path, subfolder="unet")
 
 
 text_encoder.requires_grad_(False)
 vae.requires_grad_(False)
-unet = replace_unet_conv_in(unet)
-unet = update_att_weights(unet) 
-unet.train().cuda()
+# unet = replace_unet_conv_in(unet)
+# unet = update_att_weights(unet) 
+dit.train().cuda()
 
 
 noise_scheduler = DDPMScheduler.from_pretrained(opt.pretrained_model_name_or_path, subfolder='scheduler')##{'clip_sample_range', 'rescale_betas_zero_snr', 'sample_max_value', 'timestep_spacing', 'thresholding', 'dynamic_thresholding_ratio'} 
 noise_scheduler.set_timesteps(1, device="cuda")
 noise_scheduler.alphas_cumprod = noise_scheduler.alphas_cumprod.cuda()
-tokenizer = CLIPTokenizer.from_pretrained(opt.pretrained_model_name_or_path,subfolder='tokenizer')
+tokenizer = CLIPTokenizer.from_pretrained(opt.pretrained_model_name_or_path,subfolder='clip_tokenizer')
 
 
-params, params_class_embedding = [], []
-for name, param in unet.named_parameters():
-    if 'class_embedding' in name:
-        params_class_embedding.append(param)
-    else:
-        params.append(param)
-        
-generator_optimizer = torch.optim.Adam([
-            {"params": params, "lr":opt.lr_gen},
-            {"params": params_class_embedding, "lr":opt.lr_gen*10}
-        ])
+# params, params_class_embedding = [], []
+# for name, param in unet.named_parameters():
+#     if 'class_embedding' in name:
+#         params_class_embedding.append(param)
+#     else:
+#         params.append(param)        
+generator_optimizer = torch.optim.Adam(dit.parameters(), lr=opt.lr_gen)
 
 # load data
 image_root = f'{opt.dataset_path}/DIS-TR/im/'
@@ -328,7 +315,7 @@ scaler = amp.GradScaler(enabled=True)
 
 
 for epoch in range(1, opt.epoch+1):
-    unet.train()
+    dit.train()
     loss_record = AvgMeter()
 
     epoch_loss1 = 0.0
@@ -406,12 +393,23 @@ for epoch in range(1, opt.epoch+1):
             # batch discriminative embedding
             discriminative_label = torch.tensor([[0, 1], [1, 0]], dtype=weight_dtype, device='cuda')
             BDE = torch.cat([torch.sin(discriminative_label), torch.cos(discriminative_label)], dim=-1).repeat_interleave(bsz, 0)
-            unet_input = torch.cat([rgb_latents.repeat(2,1,1,1),noisy_unified_latents], dim=1)  # Expands rgb latents so that it matches mask and edge latents batch dim and concats everything in channel dimension, out: [8, 8, 128, 128]  
+            # dit_input = torch.cat([rgb_latents.repeat(2,1,1,1),noisy_unified_latents], dim=1)  # Expands rgb latents so that it matches mask and edge latents batch dim and concats everything in channel dimension, out: [8, 8, 128, 128]  
+            dit_input = noisy_unified_latents
             
             # predict the noise 
-            noise_pred = unet(unet_input, timesteps.repeat(bsz*2), encoder_hidden_states=batch_empty_text_embed, class_labels = BDE,\
-                               rgb_token=[rgb_latents.repeat(2,1,1,1) , rgb_resized2_latents, rgb_resized4_latents, rgb_resized8_latents],\
-                ).sample 
+            # noise_pred = unet(unet_input, timesteps.repeat(bsz*2), encoder_hidden_states=batch_empty_text_embed, class_labels = BDE,\
+            #                    rgb_token=[rgb_latents.repeat(2,1,1,1) , rgb_resized2_latents, rgb_resized4_latents, rgb_resized8_latents],\
+            #     ).sample 
+            dummy_image_embeds = torch.zeros((4, 1, 512), device=text_encoder.device)
+            dummy_prompt_embeds = torch.zeros((4, 77, 64), device=text_encoder.device)
+
+            noise_pred, img_clip_out, text_out = dit(latent_image_embeds=dit_input, 
+                                                    image_embeds=dummy_image_embeds,
+                                                    prompt_embeds=dummy_prompt_embeds,
+                                                    timestep_img=timesteps.repeat(bsz*2),
+                                                    timestep_text=timesteps.repeat(bsz*2), # Symulujemy ten sam krok odszumiania dla tekstu
+                                                    encoder_hidden_states=dummy_prompt_embeds # Opcjonalne przekazanie warunkowania
+                )
             
             # one-step denoising process
             x_denoised = noise_scheduler.step(noise_pred, timesteps, noisy_unified_latents, return_dict=True).prev_sample
@@ -452,16 +450,16 @@ for epoch in range(1, opt.epoch+1):
     # Compute validation metrics every 5 epochs
     if epoch % 1 == 0:
         print(f"\nComputing validation metrics for epoch {epoch}...")
-        compute_validation_metrics(unet, test_datasets, opt.dataset_path, vae, 
+        compute_validation_metrics(dit, test_datasets, opt.dataset_path, vae, 
                                    text_encoder, tokenizer, noise_scheduler,
                                    rgb_latent_scale_factor, weight_dtype, epoch, writer, opt)
         print(f"Validation metrics logged for epoch {epoch}\n")
 
     # save checkpoints every 10 epochs
     if epoch % 5 == 0: 
-        save_path = f'../saved_model/DiffDIS/Model_{epoch}/unet/'
+        save_path = f'../saved_model/DiffDIS_DiT/Model_{epoch}/unet/'
         if not os.path.exists(save_path):
             os.makedirs(save_path)
-        save_model(unet, f'{save_path}diffusion_pytorch_model.safetensors')
+        save_model(dit, f'{save_path}diffusion_pytorch_model.safetensors')
         optimizer_state = generator_optimizer.state_dict()
-        torch.save(optimizer_state, f'../saved_model/DiffDIS/Model_{epoch}/generator_optimizer.pth')
+        torch.save(optimizer_state, f'../saved_model/DiffDIS_DiT/Model_{epoch}/generator_optimizer.pth')
