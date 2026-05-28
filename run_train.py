@@ -1,4 +1,5 @@
 import torch
+from torch import nn
 import torch.nn.functional as F
 import  os, argparse
 os.environ["CUDA_VISIBLE_DEVICES"] = '0'
@@ -13,7 +14,7 @@ from diffusers import (
     UniDiffuserModel,
     AutoencoderKL,
 )
-from transformers import CLIPTextModel, CLIPTokenizer
+from transformers import CLIPTextModel, CLIPTokenizer, ViTImageProcessor, ViTForImageClassification
 from utils.dataset_strategy import get_loader
 from utils.test_data import test_dataset
 from utils.saliency_metric import (
@@ -58,14 +59,16 @@ test_datasets = {
     'DIS-VD': "DIS5K/DIS-VD",
 }
 
-def compute_validation_metrics(model, test_datasets_dict, dataset_path, vae, 
+def compute_validation_metrics(dit_model, vit_model, vit_proj, test_datasets_dict, dataset_path, vae, 
                                text_encoder, tokenizer, noise_scheduler,
                                rgb_latent_scale_factor, weight_dtype, epoch, writer, opt):
     """
     Generate predictions using the model and compute validation metrics, then log to tensorboard
     """
-    model.eval()
-    device = next(model.parameters()).device
+    dit_model.eval()
+    vit_model.eval()
+    vit_proj.eval()
+    device = next(dit_model.parameters()).device
     
     with torch.no_grad():
         for dataset_name, gt_root_base in test_datasets_dict.items():
@@ -158,18 +161,31 @@ def compute_validation_metrics(model, test_datasets_dict, dataset_path, vae,
                 text_input_ids = text_inputs.input_ids.to(text_encoder.device)
                 empty_text_embed = text_encoder(text_input_ids)[0].to(weight_dtype)
                 batch_empty_text_embed = empty_text_embed.repeat((2, 1, 1))
-                
+
+                # Extract ViT image features for encoder_hidden_states
+                vit_inputs = vit_processor(images=img_resize, return_tensors="pt").to(device)
+                vit_outputs = vit_model.vit(**vit_inputs)
+                vit_embeds = vit_proj(vit_outputs.last_hidden_state.to(weight_dtype))
+                batch_vit_embeds = vit_embeds.repeat(2, 1, 1)
+
                 # Batch discriminative embedding
                 discriminative_label = torch.tensor([[0, 1], [1, 0]], dtype=weight_dtype, device=device)
                 BDE = torch.cat([torch.sin(discriminative_label), torch.cos(discriminative_label)], dim=-1)
                 dit_input = torch.cat([rgb_latents.repeat(2, 1, 1, 1), noisy_unified_latents], dim=1)
                 
-                # Predict noise
-                noise_pred = model(dit_input, timesteps.repeat(2), 
-                                  encoder_hidden_states=batch_empty_text_embed, 
-                                  class_labels=BDE,
-                                  rgb_token=[rgb_latents.repeat(2, 1, 1, 1), rgb_resized2_latents, 
-                                            rgb_resized4_latents, rgb_resized8_latents]).sample
+                bsz = rgb_tensor.shape[0]
+
+                dummy_image_embeds = torch.zeros((bsz*2, 1, 512), device=text_encoder.device)
+                dummy_prompt_embeds = torch.zeros((bsz*2, 77, 64), device=text_encoder.device)
+                
+                noise_pred, img_clip_out, text_out = dit_model(
+                                                    latent_image_embeds=dit_input,
+                                                    image_embeds=dummy_image_embeds,
+                                                    prompt_embeds=dummy_prompt_embeds,
+                                                    timestep_img=timesteps.repeat(bsz*2),
+                                                    timestep_text=timesteps.repeat(bsz*2),
+                                                    encoder_hidden_states=batch_vit_embeds,
+                                                )
                 
                 # Denoise one step
                 x_denoised = noise_scheduler.step(noise_pred, timesteps, noisy_unified_latents, 
@@ -265,13 +281,16 @@ def compute_validation_metrics(model, test_datasets_dict, dataset_path, vae,
 
             print(f"Epoch {epoch} - {dataset_name}: MAE={MAE:.4f}, maxF={maxf:.4f}, meanF={meanf:.4f}, "
                   f"Sm={sm_val:.4f}")
-    
-    model.train()
 
 # build models
 text_encoder = CLIPTextModel.from_pretrained(opt.pretrained_model_name_or_path, subfolder='text_encoder')
 vae = AutoencoderKL.from_pretrained(opt.pretrained_model_name_or_path, subfolder='vae')
 dit = UniDiffuserModel.from_pretrained(opt.pretrained_model_name_or_path, subfolder="unet")
+
+vit_processor = ViTImageProcessor.from_pretrained('google/vit-base-patch16-224')
+vit_model = ViTForImageClassification.from_pretrained('google/vit-base-patch16-224').to('cuda')
+vit_model.train()
+
 
 
 text_encoder.requires_grad_(False)
@@ -279,6 +298,8 @@ vae.requires_grad_(False)
 # unet = replace_unet_conv_in(unet)
 # unet = update_att_weights(unet) 
 dit.train().cuda()
+
+vit_projection = nn.Linear(vit_model.config.hidden_size, 64).to('cuda')
 
 
 noise_scheduler = DDPMScheduler.from_pretrained(opt.pretrained_model_name_or_path, subfolder='scheduler')##{'clip_sample_range', 'rescale_betas_zero_snr', 'sample_max_value', 'timestep_spacing', 'thresholding', 'dynamic_thresholding_ratio'} 
@@ -293,7 +314,7 @@ tokenizer = CLIPTokenizer.from_pretrained(opt.pretrained_model_name_or_path,subf
 #         params_class_embedding.append(param)
 #     else:
 #         params.append(param)        
-generator_optimizer = torch.optim.Adam(dit.parameters(), lr=opt.lr_gen)
+generator_optimizer = torch.optim.Adam(list(dit.parameters()) + list(vit_model.parameters()) + list(vit_projection.parameters()), lr=opt.lr_gen)
 
 # load data
 image_root = f'{opt.dataset_path}/DIS-TR/im/'
@@ -316,6 +337,8 @@ scaler = amp.GradScaler(enabled=True)
 
 for epoch in range(1, opt.epoch+1):
     dit.train()
+    vit_projection.train()
+    vit_model.train()
     loss_record = AvgMeter()
 
     epoch_loss1 = 0.0
@@ -390,6 +413,18 @@ for epoch in range(1, opt.epoch+1):
             empty_text_embed = text_encoder(text_input_ids)[0].to(weight_dtype) # Convert tokens to embeddings using text encoder
             batch_empty_text_embed = empty_text_embed.repeat((noisy_unified_latents.shape[0], 1, 1))    # Repeat text embedding so that it matches batch size  
 
+            # Extract ViT image features for encoder_hidden_states
+            vit_images = []
+            for j in range(rgb_mix.shape[0]):
+                img = rgb_mix[j].detach().cpu()
+                img = ((img + 1) / 2).clamp(0, 1)
+                img = (img.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+                vit_images.append(Image.fromarray(img))
+            vit_inputs = vit_processor(images=vit_images, return_tensors="pt").to('cuda')
+            vit_outputs = vit_model.vit(**vit_inputs)
+            vit_embeds = vit_projection(vit_outputs.last_hidden_state.to(weight_dtype))
+            batch_vit_embeds = vit_embeds.repeat_interleave(2, dim=0)
+
             # batch discriminative embedding
             discriminative_label = torch.tensor([[0, 1], [1, 0]], dtype=weight_dtype, device='cuda')
             BDE = torch.cat([torch.sin(discriminative_label), torch.cos(discriminative_label)], dim=-1).repeat_interleave(bsz, 0)
@@ -400,16 +435,17 @@ for epoch in range(1, opt.epoch+1):
             # noise_pred = unet(unet_input, timesteps.repeat(bsz*2), encoder_hidden_states=batch_empty_text_embed, class_labels = BDE,\
             #                    rgb_token=[rgb_latents.repeat(2,1,1,1) , rgb_resized2_latents, rgb_resized4_latents, rgb_resized8_latents],\
             #     ).sample 
-            dummy_image_embeds = torch.zeros((4, 1, 512), device=text_encoder.device)
-            dummy_prompt_embeds = torch.zeros((4, 77, 64), device=text_encoder.device)
+            dummy_image_embeds = torch.zeros((bsz*2, 1, 512), device=text_encoder.device)
+            dummy_prompt_embeds = torch.zeros((bsz*2, 77, 64), device=text_encoder.device)
 
-            noise_pred, img_clip_out, text_out = dit(latent_image_embeds=dit_input, 
+            noise_pred, img_clip_out, text_out = dit(
+                                                    latent_image_embeds=dit_input,
                                                     image_embeds=dummy_image_embeds,
                                                     prompt_embeds=dummy_prompt_embeds,
                                                     timestep_img=timesteps.repeat(bsz*2),
-                                                    timestep_text=timesteps.repeat(bsz*2), # Symulujemy ten sam krok odszumiania dla tekstu
-                                                    encoder_hidden_states=dummy_prompt_embeds # Opcjonalne przekazanie warunkowania
-                )
+                                                    timestep_text=timesteps.repeat(bsz*2),
+                                                    encoder_hidden_states=batch_vit_embeds,
+                                                )
             
             # one-step denoising process
             x_denoised = noise_scheduler.step(noise_pred, timesteps, noisy_unified_latents, return_dict=True).prev_sample
@@ -450,7 +486,7 @@ for epoch in range(1, opt.epoch+1):
     # Compute validation metrics every 5 epochs
     if epoch % 1 == 0:
         print(f"\nComputing validation metrics for epoch {epoch}...")
-        compute_validation_metrics(dit, test_datasets, opt.dataset_path, vae, 
+        compute_validation_metrics(dit, vit_model, vit_projection, test_datasets, opt.dataset_path, vae, 
                                    text_encoder, tokenizer, noise_scheduler,
                                    rgb_latent_scale_factor, weight_dtype, epoch, writer, opt)
         print(f"Validation metrics logged for epoch {epoch}\n")
