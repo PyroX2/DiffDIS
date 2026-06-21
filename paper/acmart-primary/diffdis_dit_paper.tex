@@ -138,6 +138,17 @@ After one denoising step, the predicted mask latent is decoded and compared with
 \end{equation}
 The VAE decoder has its own Adam optimizer and learning rate. This was intended to adapt the decoder to binary mask reconstruction, but it introduces a second moving component into training. If the denoiser and decoder drift at different speeds, the latent objective and pixel reconstruction objective can become poorly aligned.
 
+\subsection{Architecture Overview}
+Figure~\ref{fig:proposed-architecture} summarizes the final modified architecture. The RGB image is encoded by a frozen ViT and used as conditioning for both paths. The mask-generation and edge-detection paths share the same UniDiffuser transformer core, receive the eight-channel concatenation of RGB and noisy target latents, and exchange information through the mutual cross-domain attention wrapper in the middle transformer block. The two paths predict mask and edge noise separately and are supervised with MSE losses.
+
+\begin{figure*}[!t]
+  \centering
+  \includegraphics[width=0.92\textwidth]{proposed_architecture.png}
+  \caption{Architecture of the modified DiffDIS model. The original U-Net denoiser is replaced with a UniDiffuser-style transformer core, while ViT image embeddings, BDE labels, mask/edge latent paths, and mutual cross-domain attention provide task conditioning and mask-edge interaction.}
+  \Description{Diagram of the proposed architecture with two paths for mask generation and edge detection. Frozen ViT embeddings condition both paths, noisy mask and edge latents enter an eight-channel input layer, a U-ViT core contains a DBIA wrapper, and the model predicts separate mask and edge noise supervised by MSE losses.}
+  \label{fig:proposed-architecture}
+\end{figure*}
+
 \section{Implementation}
 The implementation is based on the DiffDIS codebase and the Hugging Face \texttt{diffusers} library \cite{diffusers2024}. The main modified files are:
 \begin{itemize}
@@ -219,23 +230,21 @@ Modified, DIS-TE1   & 0.2487 & 0.5217 & 0.5630 & 0.4174 \\
 
 Figure~\ref{fig:vae-comparison} gives a qualitative comparison of two internal training variants of the modified model. In both panels, the grids show reference binary masks together with model predictions. With the VAE kept frozen, the predictions are coarse and blurred, often preserving only a weak foreground location. Allowing the VAE decoder to train produces visibly sharper masks and better recovery of thin structures, although the predictions still remain less clean than the reproduced DiffDIS baseline. This supports the quantitative observation that the DiT-based variant can learn foreground structure but needs stronger stabilization before it can match the original U-Net-based pipeline.
 
-\begin{figure*}[t]
+\begin{figure}[!t]
   \centering
-  \begin{minipage}{0.49\textwidth}
-    \centering
-    \includegraphics[width=\linewidth]{frozen_vae.png}
-    \small (a) Frozen VAE.
-  \end{minipage}
-  \hfill
-  \begin{minipage}{0.49\textwidth}
-    \centering
-    \includegraphics[width=\linewidth]{trained_vae.png}
-    \small (b) Trainable VAE decoder.
-  \end{minipage}
+  \includegraphics[width=\linewidth]{frozen_vae.png}
+
+  \small (a) Frozen VAE.
+
+  \vspace{0.5em}
+
+  \includegraphics[width=\linewidth]{trained_vae.png}
+
+  \small (b) Trainable VAE decoder.
   \caption{Qualitative comparison of two VAE training variants in the modified model. The frozen VAE variant produces diffuse foreground blobs, while training the VAE decoder improves object sharpness and boundary recovery.}
   \Description{Two side-by-side qualitative comparison grids showing frozen and trainable VAE variants. The frozen VAE predictions are blurrier; the trainable VAE decoder predictions are sharper.}
   \label{fig:vae-comparison}
-\end{figure*}
+\end{figure}
 
 \section{Discussion}
 \subsection{What Worked}
