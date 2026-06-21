@@ -40,7 +40,7 @@
 \renewcommand{\shortauthors}{Wilk, Sochacki, and Grunwald}
 
 \begin{abstract}
-Dichotomous image segmentation (DIS) requires category-agnostic binary masks with accurate object boundaries and fine internal structure. DiffDIS showed that a pre-trained latent diffusion model can be repurposed for this task by combining VAE-space mask generation, one-step denoising, auxiliary edge prediction, and mask-edge interaction. In this work we document our reproduction of DiffDIS and an architectural modification that replaces the original U-Net denoising backbone with a DiT-style UniDiffuser transformer. The modified model adapts the image-latent input projection to an eight-channel segmentation input, uses Vision Transformer features as image conditioning, injects mutual cross-domain attention between mask and edge streams, and fine-tunes the VAE decoder with a reconstruction loss. We evaluate the reproduced baseline and the modified model on the original DIS5K validation/test splits and on an additional smaller dataset. The reproduction obtains strong results close to the expected DiffDIS behavior, while the transformer-based modification substantially underperforms on the original benchmark. Rather than presenting the modification as an improvement, this report analyzes it as a controlled engineering study: it identifies which parts of the DiffDIS design were transferable, which assumptions became fragile under a DiT backbone, and what would be required to stabilize future transformer-based dense prediction variants.
+Dichotomous image segmentation (DIS) requires category-agnostic binary masks with accurate object boundaries and fine internal structure. DiffDIS showed that a pre-trained latent diffusion model can be repurposed for this task by combining VAE-space mask generation, one-step denoising, auxiliary edge prediction, and mask-edge interaction. In this work we document our reproduction of DiffDIS and an architectural modification that replaces the original U-Net denoising backbone with a DiT-style UniDiffuser transformer. The modified model adapts the image-latent input projection to an eight-channel segmentation input, uses Vision Transformer features as image conditioning, injects mutual cross-domain attention between mask and edge streams, and fine-tunes the VAE decoder with a reconstruction loss. We evaluate the reproduced baseline and the modified model on the original DIS5K validation/test splits and on a ThinObject5K benchmark. The reproduction obtains strong results close to the expected DiffDIS behavior, while the transformer-based modification substantially underperforms on the original benchmark. Rather than presenting the modification as an improvement, this report analyzes it as a controlled engineering study: it identifies which parts of the DiffDIS design were transferable, which assumptions became fragile under a DiT backbone, and what would be required to stabilize future transformer-based dense prediction variants.
 \end{abstract}
 
 \begin{CCSXML}
@@ -99,13 +99,13 @@ The reproduced baseline follows the public DiffDIS repository and the paper's ov
 
 Two details are central. First, mask and edge are distinguished by Batch-Discriminative Embedding (BDE), a compact task label encoding also used in diffusion-based geometry systems \cite{fu2024geowizard}. Second, the model uses an interaction module between mask and edge features, so the auxiliary edge task can directly inform mask prediction. This is the mechanism that motivates our own mutual cross-domain attention layer in the transformer version.
 
-The baseline uses CutMix augmentation \cite{yun2019cutmix}, latent-space training, and one-step denoising. In our reproduction we evaluated the model on the original DIS5K validation and test subsets and on an additional smaller dataset. These reproduced results are used as the empirical reference point for the modified model.
+The baseline uses CutMix augmentation \cite{yun2019cutmix}, latent-space training, and one-step denoising. In our reproduction we evaluated the model on the original DIS5K validation and test subsets and on a ThinObject5K benchmark. These reproduced results are used as the empirical reference point for the modified model.
 
 \section{Proposed Modification}
 \subsection{Replacing the Denoising Backbone}
 The core modification is in \texttt{run\_train.py}: the original DiffDIS U-Net denoiser is replaced with \texttt{UniDiffuserModel} loaded from \texttt{thu-ml/unidiffuser-v1}. Because the DiffDIS-style input concatenates RGB latents with noisy target latents, the UniDiffuser image input projection must accept eight channels instead of four. We implement this in \texttt{replace\_dit\_in\_dim}: the original projection weights are duplicated across the channel dimension and scaled by $0.5$, giving the model a symmetric initialization for the RGB and target halves of the input.
 
-This is a conservative initialization: it avoids randomizing the first projection completely, but it also assumes that the pre-trained projection can be meaningfully reused for the new channel layout. The results suggest that this assumption is only partially valid.
+This is a conservative initialization: it avoids randomizing the first projection completely, but it also assumes that the pre-trained projection can be meaningfully reused for the new channel layout. This approach is the same as the one presented in the original DiffDIS paper.
 
 \subsection{Vision Transformer Conditioning}
 The original DiffDIS model uses text-related conditioning infrastructure with an empty prompt and image latents. Our modified implementation introduces a frozen ViT-B/16 image-feature extractor \cite{dosovitskiy2021vit}. In the code, this corresponds to the Hugging Face checkpoint \path{google/vit-base-patch16-224}. The ViT hidden states are projected to match the expected conditioning dimension and duplicated for the mask and edge streams. This produces image-aware prompt embeddings for the UniDiffuser forward pass.
@@ -160,7 +160,7 @@ The modified training configuration uses batch size 2 and image size 512. The mo
 
 \section{Experimental Setup}
 \subsection{Datasets}
-We report two evaluation settings. The first is the original DIS5K setting, including DIS-VD and DIS-TE1 through DIS-TE4. The second is an additional smaller dataset, marked as ``New dataset'' in our result sheets, with DIS-VD and DIS-TE1 measurements. The additional dataset is useful as a secondary sanity check, but it is smaller and should not be interpreted as a replacement for the full DIS5K benchmark.
+We report two evaluation settings. The first is the original DIS5K setting, including DIS-VD and DIS-TE1 through DIS-TE4. The second is a ThinObject5K benchmark, marked as ``New dataset'' in our result sheets, with DIS-VD and DIS-TE1 measurements. This benchmark uses ThinObject5K for training and COIFT+HRSOD for validation, and its validation/test settings are reported as DIS-VD and DIS-TE1, respectively, with the standard ThinObject5K train/test split used for testing. The ThinObject5K combination is useful as a secondary sanity check, but it should not be interpreted as a replacement for the full DIS5K benchmark.
 
 \subsection{Metrics}
 The result sheets include MAE, BER, maximum F-measure (maxF), average F-measure (avgF), weighted F-measure (wFm), S-measure (Sm), adaptive E-measure (adpEm), mean Dice, mean IoU, accuracy, and HCE. Lower is better for MAE, BER, and HCE; higher is better for the remaining metrics. To keep the paper readable, the main tables report MAE, maxF, Sm, mean IoU, and HCE. These cover pixel error, region quality, structural similarity, overlap, and correction effort.
@@ -199,11 +199,11 @@ Average & 0.0294 & 0.9048 & 0.9026 & 0.8388 & 953.8 & 0.4117 & 0.3106 & 0.4084 &
 
 The gap is too large to attribute to metric noise. On DIS-TE1, maxF decreases from $0.8785$ to $0.2337$ and mean IoU decreases from $0.8133$ to $0.1843$. Even on DIS-TE4, where the modified model obtains its highest maxF among the original test subsets, it remains far below the reproduced baseline.
 
-Table~\ref{tab:new-results} reports the additional smaller dataset. The modified model is still weaker, but the gap is less uniform. On the additional DIS-VD subset, reproduced DiffDIS obtains maxF $0.7575$ and the modified model obtains $0.5457$. On the additional DIS-TE1 subset, reproduced DiffDIS obtains maxF $0.9326$, while the modified model obtains $0.5217$. The result suggests that the modified model can learn some foreground structure, but not with the precision needed for DIS.
+Table~\ref{tab:new-results} reports the ThinObject5K benchmark. The modified model is still weaker, but the gap is less uniform. On the benchmark's DIS-VD subset, reproduced DiffDIS obtains maxF $0.7575$ and the modified model obtains $0.5457$. On the benchmark's DIS-TE1 subset, reproduced DiffDIS obtains maxF $0.9326$, while the modified model obtains $0.5217$. The result suggests that the modified model can learn some foreground structure, but not with the precision needed for DIS.
 
 \begin{table}[t]
 \centering
-\caption{Results on the additional smaller dataset.}
+\caption{Results on the ThinObject5K benchmark.}
 \label{tab:new-results}
 \begin{tabular}{lrrrr}
 \toprule
