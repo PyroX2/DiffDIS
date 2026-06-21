@@ -67,7 +67,7 @@ Dichotomous image segmentation (DIS) requires category-agnostic binary masks wit
 \maketitle
 
 \section{Introduction}
-Dichotomous image segmentation (DIS) is the task of producing a high-accuracy binary foreground mask for arbitrary objects in natural images. Unlike class-specific semantic segmentation, DIS is category agnostic. Unlike coarse salient object detection, it emphasizes accurate object silhouettes, thin structures, holes, and high-frequency details. This makes the task difficult: a successful model needs a wide receptive field to understand global object extent, but it must also preserve local detail at boundaries and internal structures.
+Dichotomous image segmentation (DIS) is the task of producing a high-accuracy binary foreground mask for arbitrary objects in natural images. In contrast to class-specific semantic segmentation, DIS is category agnostic. Unlike coarse salient object detection, it emphasizes accurate object silhouettes, thin structures, holes, and high-frequency details. This makes the task difficult: a successful model needs a wide receptive field to understand global object extent, but it must also preserve local detail at boundaries and internal structures.
 
 DiffDIS addresses this problem by repurposing the capacity of pre-trained latent diffusion models for segmentation \cite{yu2025diffdis}. The original method maps RGB images, masks, and edge maps into the VAE latent space, trains a denoising model to recover mask and edge latents in a single step, and uses an auxiliary edge task to make the generative process more deterministic. This design is attractive for a student research project because it combines modern diffusion models with a concrete, measurable dense prediction task.
 
